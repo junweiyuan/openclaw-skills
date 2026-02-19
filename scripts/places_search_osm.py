@@ -17,7 +17,11 @@ import urllib.parse
 import urllib.request
 
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
-OVERPASS = "https://overpass-api.de/api/interpreter"
+OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
 
 
 def http_get_json(url: str, headers: dict | None = None, timeout: int = 25):
@@ -83,15 +87,30 @@ out center tags;
 
 def search_places(lat: float, lon: float, query: str, radius_m: int, limit: int):
     overpass_q = build_overpass_query(lat, lon, radius_m, query)
-    raw = http_post_text(
-        OVERPASS,
-        overpass_q,
-        headers={
-            "User-Agent": "openclaw-osm-places/1.0 (local assistant)",
-            "Content-Type": "text/plain; charset=utf-8",
-        },
-    )
-    data = json.loads(raw)
+
+    last_err = None
+    data = None
+    for endpoint in OVERPASS_ENDPOINTS:
+        for _ in range(2):  # light retry per endpoint
+            try:
+                raw = http_post_text(
+                    endpoint,
+                    overpass_q,
+                    headers={
+                        "User-Agent": "openclaw-osm-places/1.0 (local assistant)",
+                        "Content-Type": "text/plain; charset=utf-8",
+                    },
+                )
+                data = json.loads(raw)
+                break
+            except Exception as e:
+                last_err = e
+        if data is not None:
+            break
+
+    if data is None:
+        raise RuntimeError(f"All Overpass endpoints failed: {last_err}")
+
     out = []
     for el in data.get("elements", []):
         tags = el.get("tags", {})
