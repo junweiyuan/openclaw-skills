@@ -105,7 +105,14 @@ def create_browser_context(cookie: str) -> tuple[BrowserContext, Page, "Browser"
                 context.add_cookies(browser_cookies)
 
             page = context.new_page()
-            page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded")
+            try:
+                page.goto(
+                    "https://www.xiaohongshu.com",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+            except Exception:
+                logger.debug("initial page load timeout, continuing anyway")
             try:
                 page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
@@ -416,7 +423,7 @@ def _fetch_note_detail_from_page(
     )
     detail_page = context.new_page()
     try:
-        detail_page.goto(detail_url, wait_until="domcontentloaded")
+        detail_page.goto(detail_url, wait_until="domcontentloaded", timeout=15000)
         try:
             detail_page.wait_for_selector("#detail-desc", timeout=8000)
         except Exception:
@@ -477,8 +484,11 @@ def search_notes_via_browser(
     )
 
     try:
-        page.goto(search_url, wait_until="domcontentloaded")
-        page.wait_for_load_state("networkidle")
+        page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
         time.sleep(2)
 
         # 关闭可能弹出的登录框
@@ -593,12 +603,15 @@ def enrich_notes_with_details(
     发布时间、互动数据和标签，然后基于正文重新识别公司/岗位/面试类型。
     """
     enriched = 0
-    for note in notes:
+    total = len(notes)
+    for idx, note in enumerate(notes):
         note_id = note.get("笔记ID", "")
         xsec_token = note.pop("_xsec_token", "")
         if not note_id or not xsec_token:
             continue
 
+        if (idx + 1) % 10 == 1 or idx == 0:
+            logger.info(f"  详情获取进度: {idx + 1}/{total}")
         _random_sleep(MIN_REQUEST_INTERVAL, MAX_REQUEST_INTERVAL)
         detail = _fetch_note_detail_from_page(context, note_id, xsec_token)
 
