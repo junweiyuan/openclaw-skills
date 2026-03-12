@@ -58,12 +58,12 @@ def _random_sleep(min_sec: float, max_sec: float):
     time.sleep(sleep_time)
 
 
-def create_browser_context(cookie: str) -> tuple[BrowserContext, Page]:
+def create_browser_context(cookie: str) -> tuple[BrowserContext, Page, "Browser", "Playwright"]:
     """
     创建 Playwright 浏览器上下文和页面，注入 cookie。
 
     :param cookie: 小红书网页版 cookie 字符串
-    :return: (BrowserContext, Page) 元组
+    :return: (BrowserContext, Page, Browser, Playwright) 元组
     """
     playwright_ctx = sync_playwright().start()
     stealth_js_path = os.path.join(os.path.dirname(__file__), "stealth.min.js")
@@ -107,7 +107,7 @@ def create_browser_context(cookie: str) -> tuple[BrowserContext, Page]:
     time.sleep(2)
 
     logger.info("Playwright 浏览器上下文创建成功")
-    return context, page
+    return context, page, browser, playwright_ctx
 
 
 def generate_search_queries() -> list[dict]:
@@ -579,7 +579,7 @@ def run_scraper(
     existing_ids = load_history() if incremental else set()
     logger.info(f"已有历史记录: {len(existing_ids)} 条")
 
-    context, page = create_browser_context(cookie)
+    context, page, browser, playwright_instance = create_browser_context(cookie)
 
     queries = generate_search_queries()
     if max_keywords:
@@ -624,6 +624,8 @@ def run_scraper(
 
     try:
         context.close()
+        browser.close()
+        playwright_instance.stop()
     except Exception:
         pass
 

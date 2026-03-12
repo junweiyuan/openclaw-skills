@@ -276,7 +276,7 @@ def export_to_excel(
     if append and os.path.exists(output_path):
         try:
             existing_wb = load_workbook(output_path)
-            ws = existing_wb.active
+            ws = existing_wb["全部笔记"] if "全部笔记" in existing_wb.sheetnames else existing_wb.active
             if ws is not None:
                 headers_row = [cell.value for cell in ws[1]]
                 for row in ws.iter_rows(min_row=2, values_only=True):
