@@ -67,48 +67,56 @@ def create_browser_context(cookie: str) -> tuple[BrowserContext, Page, "Browser"
     :return: (BrowserContext, Page, Browser, Playwright) 元组
     """
     playwright_ctx = sync_playwright().start()
-    stealth_js_path = os.path.join(os.path.dirname(__file__), "stealth.min.js")
+    try:
+        stealth_js_path = os.path.join(os.path.dirname(__file__), "stealth.min.js")
 
-    if not os.path.exists(stealth_js_path):
-        logger.warning("stealth.min.js not found. Downloading from CDN...")
-        import urllib.request
-        urllib.request.urlretrieve(
-            "https://cdn.jsdelivr.net/gh/requireCool/stealth.min.js/stealth.min.js",
-            stealth_js_path,
-        )
-        logger.info("stealth.min.js downloaded successfully.")
+        if not os.path.exists(stealth_js_path):
+            logger.warning("stealth.min.js not found. Downloading from CDN...")
+            import urllib.request
+            urllib.request.urlretrieve(
+                "https://cdn.jsdelivr.net/gh/requireCool/stealth.min.js/stealth.min.js",
+                stealth_js_path,
+            )
+            logger.info("stealth.min.js downloaded successfully.")
 
-    browser = playwright_ctx.chromium.launch(headless=True)
-    context = browser.new_context(
-        viewport={"width": 1920, "height": 1080},
-        user_agent=(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
-    )
-    context.add_init_script(path=stealth_js_path)
+        browser = playwright_ctx.chromium.launch(headless=True)
+        try:
+            context = browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+            )
+            context.add_init_script(path=stealth_js_path)
 
-    cookie_pairs = [c.strip() for c in cookie.split(";") if "=" in c]
-    browser_cookies = []
-    for pair in cookie_pairs:
-        name, _, value = pair.partition("=")
-        browser_cookies.append({
-            "name": name.strip(),
-            "value": value.strip(),
-            "domain": ".xiaohongshu.com",
-            "path": "/",
-        })
-    if browser_cookies:
-        context.add_cookies(browser_cookies)
+            cookie_pairs = [c.strip() for c in cookie.split(";") if "=" in c]
+            browser_cookies = []
+            for pair in cookie_pairs:
+                name, _, value = pair.partition("=")
+                browser_cookies.append({
+                    "name": name.strip(),
+                    "value": value.strip(),
+                    "domain": ".xiaohongshu.com",
+                    "path": "/",
+                })
+            if browser_cookies:
+                context.add_cookies(browser_cookies)
 
-    page = context.new_page()
-    page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded")
-    page.wait_for_load_state("networkidle")
-    time.sleep(2)
+            page = context.new_page()
+            page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded")
+            page.wait_for_load_state("networkidle")
+            time.sleep(2)
 
-    logger.info("Playwright 浏览器上下文创建成功")
-    return context, page, browser, playwright_ctx
+            logger.info("Playwright 浏览器上下文创建成功")
+            return context, page, browser, playwright_ctx
+        except Exception:
+            browser.close()
+            raise
+    except Exception:
+        playwright_ctx.stop()
+        raise
 
 
 def generate_search_queries() -> list[dict]:

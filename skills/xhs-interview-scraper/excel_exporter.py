@@ -175,7 +175,8 @@ def create_company_sheets(wb: Workbook, notes: list[dict]):
         )
         add_notes_to_sheet(ws, sorted_notes)
 
-    logger.info(f"创建了 {len(company_groups)} 个公司分Sheet")
+    sheets_created = sum(1 for notes in company_groups.values() if len(notes) >= 2)
+    logger.info(f"创建了 {sheets_created} 个公司分Sheet")
 
 
 def create_summary_sheet(wb: Workbook, notes: list[dict]):
