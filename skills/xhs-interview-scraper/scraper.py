@@ -401,16 +401,36 @@ def _extract_notes_from_page(page: Page) -> list[dict]:
     return page.evaluate(_JS_EXTRACT_NOTES)
 
 
-def _fetch_note_detail_from_page(page: Page, note_url: str) -> dict:
-    """通过浏览器访问笔记详情页获取更多信息。"""
+def _fetch_note_detail_from_page(
+    context: BrowserContext, note_id: str, xsec_token: str
+) -> dict:
+    """在新标签页中打开笔记详情页获取更多信息。
+
+    小红书 /explore/<id> 页面需要 xsec_token 参数才能正常渲染详情，
+    并且必须在新页面中打开（而非复用搜索页导航），否则会触发安全限制。
+    """
+    detail_url = (
+        f"https://www.xiaohongshu.com/explore/{note_id}"
+        f"?xsec_token={urllib.parse.quote(xsec_token)}"
+        f"&xsec_source=pc_search"
+    )
+    detail_page = context.new_page()
     try:
-        page.goto(note_url, wait_until="domcontentloaded")
-        page.wait_for_load_state("networkidle")
+        detail_page.goto(detail_url, wait_until="domcontentloaded")
+        try:
+            detail_page.wait_for_selector("#detail-desc", timeout=8000)
+        except Exception:
+            pass
         time.sleep(1)
-        return page.evaluate(_JS_EXTRACT_DETAIL)
+        return detail_page.evaluate(_JS_EXTRACT_DETAIL)
     except Exception as e:
-        logger.debug(f"获取笔记详情失败: {e}")
+        logger.debug(f"获取笔记详情失败 ({note_id}): {e}")
         return {}
+    finally:
+        try:
+            detail_page.close()
+        except Exception:
+            pass
 
 
 def search_notes_via_browser(
@@ -419,13 +439,36 @@ def search_notes_via_browser(
     max_pages: int = MAX_PAGES_PER_KEYWORD,
     existing_ids: Optional[set] = None,
 ) -> list[dict]:
-    """通过浏览器搜索小红书笔记并解析结果。"""
+    """通过浏览器搜索小红书笔记并解析结果。
+
+    同时拦截搜索 API 响应以获取每条笔记的 xsec_token，
+    该 token 在后续打开详情页时必须携带。
+    """
     keyword = query["keyword"]
     results = []
     if existing_ids is None:
         existing_ids = set()
 
     logger.info(f"开始搜索: '{keyword}'")
+
+    # 用于收集搜索 API 中每条笔记的 xsec_token
+    xsec_tokens: dict[str, str] = {}
+
+    def _capture_search_api(response):
+        """拦截搜索 API 响应，提取 xsec_token。"""
+        if "/api/sns/web/v1/search/notes" not in response.url:
+            return
+        try:
+            body = response.json()
+            for item in body.get("data", {}).get("items", []):
+                nid = item.get("id", "")
+                token = item.get("xsec_token", "")
+                if nid and token:
+                    xsec_tokens[nid] = token
+        except Exception:
+            pass
+
+    page.on("response", _capture_search_api)
 
     encoded_keyword = urllib.parse.quote(keyword)
     search_url = (
@@ -512,6 +555,7 @@ def search_notes_via_browser(
                     "标签": "",
                     "抓取时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "搜索关键词": keyword,
+                    "_xsec_token": xsec_tokens.get(note_id, ""),
                 }
                 results.append(parsed_note)
                 existing_ids.add(note_id)
@@ -533,26 +577,30 @@ def search_notes_via_browser(
     except Exception as e:
         logger.error(f"  搜索 '{keyword}' 出错: {e}")
         _random_sleep(10, 20)
+    finally:
+        page.remove_listener("response", _capture_search_api)
 
     return results
 
 
 def enrich_notes_with_details(
-    page: Page,
+    context: BrowserContext,
     notes: list[dict],
-    max_detail_fetches: int = 10,
 ) -> list[dict]:
-    """对搜索结果中的笔记逐个打开详情页补充内容。"""
-    count = 0
+    """对搜索结果中的笔记逐个在新标签页中打开详情页补充内容。
+
+    为每条笔记打开独立的详情页（携带 xsec_token），提取正文内容、
+    发布时间、互动数据和标签，然后基于正文重新识别公司/岗位/面试类型。
+    """
+    enriched = 0
     for note in notes:
-        if count >= max_detail_fetches:
-            break
-        note_link = note.get("笔记链接", "")
-        if not note_link:
+        note_id = note.get("笔记ID", "")
+        xsec_token = note.pop("_xsec_token", "")
+        if not note_id or not xsec_token:
             continue
 
         _random_sleep(MIN_REQUEST_INTERVAL, MAX_REQUEST_INTERVAL)
-        detail = _fetch_note_detail_from_page(page, note_link)
+        detail = _fetch_note_detail_from_page(context, note_id, xsec_token)
 
         if detail:
             if detail.get("desc"):
@@ -580,9 +628,9 @@ def enrich_notes_with_details(
                 new_type = identify_interview_type(title, desc)
                 if new_type:
                     note["面试类型"] = new_type
-        count += 1
+            enriched += 1
 
-    logger.info(f"  已补充 {count} 条笔记的详情信息")
+    logger.info(f"  已补充 {enriched}/{len(notes)} 条笔记的详情信息")
     return notes
 
 
@@ -627,7 +675,7 @@ def run_scraper(
             )
 
             if notes:
-                notes = enrich_notes_with_details(page, notes, max_detail_fetches=5)
+                notes = enrich_notes_with_details(context, notes)
                 notes = [
                     n for n in notes
                     if is_note_recent(n.get("发布时间", ""))
