@@ -29,6 +29,7 @@ from config import (
     MAX_NOTE_AGE_DAYS,
     MAX_PAGES_PER_KEYWORD,
     MAX_REQUEST_INTERVAL,
+    MIN_LIKES,
     MIN_REQUEST_INTERVAL,
     TECH_DIRECTIONS,
     DATA_DIR,
@@ -448,6 +449,8 @@ def search_notes_via_browser(
                 author_name = raw.get("authorName", "")
                 author_id = raw.get("authorId", "")
                 like_count = _parse_count(raw.get("likeCount", "0"))
+                if like_count < MIN_LIKES:
+                    continue
                 is_video = raw.get("isVideo", False)
                 note_link = raw.get("href", "")
                 if not note_link and note_id:
@@ -581,53 +584,64 @@ def run_scraper(
 
     context, page, browser, playwright_instance = create_browser_context(cookie)
 
-    queries = generate_search_queries()
-    if max_keywords:
-        queries = queries[:max_keywords]
-
     all_notes = []
-    total_searches = 0
-    batch_count = 0
-
-    for i, query in enumerate(queries):
-        if total_searches >= MAX_DAILY_REQUESTS:
-            logger.warning(
-                f"已达到每日最大请求次数 ({MAX_DAILY_REQUESTS})，停止抓取"
-            )
-            break
-
-        logger.info(f"\n[{i + 1}/{len(queries)}] 搜索: {query['keyword']}")
-
-        notes = search_notes_via_browser(
-            page=page,
-            query=query,
-            existing_ids=existing_ids,
-        )
-
-        if notes:
-            notes = enrich_notes_with_details(page, notes, max_detail_fetches=5)
-
-        all_notes.extend(notes)
-        total_searches += 1
-
-        _random_sleep(MIN_REQUEST_INTERVAL, MAX_REQUEST_INTERVAL)
-
-        batch_count += 1
-        if batch_count >= 10:
-            logger.info("已完成一批搜索，休息中...")
-            _random_sleep(BATCH_REST_MIN, BATCH_REST_MAX)
-            batch_count = 0
-
-    for note in all_notes:
-        existing_ids.add(note["笔记ID"])
-    save_history(existing_ids)
-
     try:
-        context.close()
-        browser.close()
-        playwright_instance.stop()
-    except Exception:
-        pass
+        queries = generate_search_queries()
+        if max_keywords:
+            queries = queries[:max_keywords]
+
+        total_searches = 0
+        batch_count = 0
+
+        for i, query in enumerate(queries):
+            if total_searches >= MAX_DAILY_REQUESTS:
+                logger.warning(
+                    f"已达到每日最大请求次数 ({MAX_DAILY_REQUESTS})，停止抓取"
+                )
+                break
+
+            logger.info(f"\n[{i + 1}/{len(queries)}] 搜索: {query['keyword']}")
+
+            notes = search_notes_via_browser(
+                page=page,
+                query=query,
+                existing_ids=existing_ids,
+            )
+
+            if notes:
+                notes = enrich_notes_with_details(page, notes, max_detail_fetches=5)
+                notes = [
+                    n for n in notes
+                    if is_note_recent(n.get("发布时间", ""))
+                ]
+
+            all_notes.extend(notes)
+            total_searches += 1
+
+            _random_sleep(MIN_REQUEST_INTERVAL, MAX_REQUEST_INTERVAL)
+
+            batch_count += 1
+            if batch_count >= 10:
+                logger.info("已完成一批搜索，休息中...")
+                _random_sleep(BATCH_REST_MIN, BATCH_REST_MAX)
+                batch_count = 0
+    finally:
+        for note in all_notes:
+            existing_ids.add(note["笔记ID"])
+        save_history(existing_ids)
+
+        try:
+            context.close()
+        except Exception:
+            pass
+        try:
+            browser.close()
+        except Exception:
+            pass
+        try:
+            playwright_instance.stop()
+        except Exception:
+            pass
 
     logger.info("=" * 60)
     logger.info(f"抓取完成！共获取 {len(all_notes)} 条新笔记")
