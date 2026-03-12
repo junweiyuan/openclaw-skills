@@ -78,7 +78,7 @@ def daily_update():
         notes = []
 
     if notes:
-        output_path = export_to_excel(
+        output_path, _ = export_to_excel(
             notes=notes,
             append=True,
         )

@@ -302,7 +302,7 @@ def export_to_excel(
 
     if not all_notes:
         logger.warning("没有数据可以导出")
-        return output_path
+        return output_path, []
 
     # 按发布时间排序（最新在前）
     all_notes.sort(key=lambda x: x.get("发布时间") or "", reverse=True)
