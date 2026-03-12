@@ -2,7 +2,8 @@
 Xiaohongshu Interview Scraper - Core Scraping Module
 小红书面试信息抓取核心模块
 
-使用 xhs 库（基于 Playwright）进行签名，通过 Web API 搜索和获取笔记。
+使用 Playwright 进行浏览器级别的搜索和数据抓取。
+通过直接访问搜索页面并解析 DOM 获取笔记数据，避免 API 级别的反爬检测。
 支持关键词搜索、内容解析、公司/岗位识别、反爬虫策略。
 """
 
@@ -12,11 +13,11 @@ import os
 import random
 import re
 import time
-from datetime import datetime, timedelta, timezone
+import urllib.parse
+from datetime import datetime, timedelta
 from typing import Optional
 
-from xhs import SearchSortType, XhsClient
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, Page, BrowserContext
 
 from config import (
     BATCH_REST_MAX,
@@ -28,8 +29,6 @@ from config import (
     MAX_NOTE_AGE_DAYS,
     MAX_PAGES_PER_KEYWORD,
     MAX_REQUEST_INTERVAL,
-    MIN_COLLECTS,
-    MIN_LIKES,
     MIN_REQUEST_INTERVAL,
     TECH_DIRECTIONS,
     DATA_DIR,
@@ -59,21 +58,18 @@ def _random_sleep(min_sec: float, max_sec: float):
     time.sleep(sleep_time)
 
 
-def create_xhs_client(cookie: str) -> XhsClient:
+def create_browser_context(cookie: str) -> tuple[BrowserContext, Page]:
     """
-    创建 XhsClient 实例，使用 Playwright 进行签名。
+    创建 Playwright 浏览器上下文和页面，注入 cookie。
 
     :param cookie: 小红书网页版 cookie 字符串
-    :return: XhsClient 实例
+    :return: (BrowserContext, Page) 元组
     """
     playwright_ctx = sync_playwright().start()
     stealth_js_path = os.path.join(os.path.dirname(__file__), "stealth.min.js")
 
-    # 如果没有 stealth.min.js，提示下载
     if not os.path.exists(stealth_js_path):
-        logger.warning(
-            "stealth.min.js not found. Downloading from CDN..."
-        )
+        logger.warning("stealth.min.js not found. Downloading from CDN...")
         import urllib.request
         urllib.request.urlretrieve(
             "https://cdn.jsdelivr.net/gh/requireCool/stealth.min.js/stealth.min.js",
@@ -84,40 +80,40 @@ def create_xhs_client(cookie: str) -> XhsClient:
     browser = playwright_ctx.chromium.launch(headless=True)
     context = browser.new_context(
         viewport={"width": 1920, "height": 1080},
+        user_agent=(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
     )
     context.add_init_script(path=stealth_js_path)
+
+    cookie_pairs = [c.strip() for c in cookie.split(";") if "=" in c]
+    browser_cookies = []
+    for pair in cookie_pairs:
+        name, _, value = pair.partition("=")
+        browser_cookies.append({
+            "name": name.strip(),
+            "value": value.strip(),
+            "domain": ".xiaohongshu.com",
+            "path": "/",
+        })
+    if browser_cookies:
+        context.add_cookies(browser_cookies)
+
     page = context.new_page()
-    page.goto("https://www.xiaohongshu.com")
-    # 注入 cookie
-    browser_cookie = cookie
-    page.evaluate("void(0)")  # ensure page is loaded
+    page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded")
+    page.wait_for_load_state("networkidle")
+    time.sleep(2)
 
-    def sign_func(uri, data=None, a1="", web_session=""):
-        page.evaluate("void(0)")
-        encrypt_params = page.evaluate(
-            "([url, data]) => window._webmsxyw(url, data)",
-            [uri, data],
-        )
-        return {
-            "x-s": encrypt_params["X-s"],
-            "x-t": str(encrypt_params["X-t"]),
-        }
-
-    xhs_client = XhsClient(cookie=cookie, sign=sign_func)
-    logger.info("XhsClient 初始化成功")
-    return xhs_client
+    logger.info("Playwright 浏览器上下文创建成功")
+    return context, page
 
 
 def generate_search_queries() -> list[dict]:
-    """
-    生成搜索关键词组合列表。
-    策略：公司名 + 面试关键词 + 技术方向（可选）
-
-    :return: 搜索查询列表，每个元素包含 keyword, company, interview_type, tech_direction
-    """
+    """生成搜索关键词组合列表。"""
     queries = []
 
-    # 策略1: 公司 + 面试关键词
     for company in COMPANY_SHORT_NAMES:
         for interview_kw in INTERVIEW_KEYWORDS:
             queries.append({
@@ -127,9 +123,8 @@ def generate_search_queries() -> list[dict]:
                 "tech_direction": "",
             })
 
-    # 策略2: 技术方向 + 面试关键词（不限定公司）
-    for tech in TECH_DIRECTIONS[:5]:  # 取前5个方向避免过多
-        for interview_kw in INTERVIEW_KEYWORDS[:3]:  # 取前3个面试关键词
+    for tech in TECH_DIRECTIONS[:5]:
+        for interview_kw in INTERVIEW_KEYWORDS[:3]:
             queries.append({
                 "keyword": f"{tech} {interview_kw}",
                 "company": "",
@@ -137,7 +132,6 @@ def generate_search_queries() -> list[dict]:
                 "tech_direction": tech,
             })
 
-    # 策略3: 公司 + 技术方向（热门组合）
     hot_combos = [
         ("OpenAI", "LLM算法"), ("Google", "大模型算法"),
         ("Meta", "多模态算法"), ("DeepSeek", "LLM算法"),
@@ -152,7 +146,6 @@ def generate_search_queries() -> list[dict]:
             "tech_direction": tech,
         })
 
-    # 去重
     seen = set()
     unique_queries = []
     for q in queries:
@@ -165,56 +158,31 @@ def generate_search_queries() -> list[dict]:
 
 
 def identify_company(title: str, desc: str) -> str:
-    """
-    从标题和内容中识别公司名称。
-
-    :param title: 笔记标题
-    :param desc: 笔记内容
-    :return: 识别到的公司名称，未识别到返回空字符串
-    """
+    """从标题和内容中识别公司名称。"""
     text = f"{title} {desc}".lower()
     company_mapping = {
-        "openai": "OpenAI",
-        "open ai": "OpenAI",
-        "xai": "xAI",
-        "x.ai": "xAI",
-        "google": "Google",
-        "谷歌": "Google",
-        "amazon": "Amazon",
-        "亚马逊": "Amazon",
-        "aws": "Amazon",
-        "apple": "Apple",
-        "苹果": "Apple",
-        "meta": "Meta",
-        "facebook": "Meta",
+        "openai": "OpenAI", "open ai": "OpenAI",
+        "xai": "xAI", "x.ai": "xAI",
+        "google": "Google", "谷歌": "Google",
+        "amazon": "Amazon", "亚马逊": "Amazon", "aws": "Amazon",
+        "apple": "Apple", "苹果": "Apple",
+        "meta": "Meta", "facebook": "Meta",
         "anthropic": "Anthropic",
-        "deepseek": "DeepSeek",
-        "深度求索": "DeepSeek",
-        "kimi": "Kimi",
-        "月之暗面": "Kimi",
-        "moonshot": "Kimi",
+        "deepseek": "DeepSeek", "深度求索": "DeepSeek",
+        "kimi": "Kimi", "月之暗面": "Kimi", "moonshot": "Kimi",
         "seed": "Seed",
-        "字节跳动": "ByteDance/Seed",
-        "bytedance": "ByteDance/Seed",
-        "字节": "ByteDance/Seed",
-        "tiktok": "ByteDance/Seed",
+        "字节跳动": "ByteDance/Seed", "bytedance": "ByteDance/Seed",
+        "字节": "ByteDance/Seed", "tiktok": "ByteDance/Seed",
     }
-    found_companies = []
-    for keyword, company_name in company_mapping.items():
-        if keyword in text:
-            if company_name not in found_companies:
-                found_companies.append(company_name)
-    return ", ".join(found_companies) if found_companies else ""
+    found = []
+    for kw, name in company_mapping.items():
+        if kw in text and name not in found:
+            found.append(name)
+    return ", ".join(found) if found else ""
 
 
 def identify_tech_direction(title: str, desc: str) -> str:
-    """
-    从标题和内容中识别技术方向/岗位。
-
-    :param title: 笔记标题
-    :param desc: 笔记内容
-    :return: 识别到的技术方向
-    """
+    """从标题和内容中识别技术方向/岗位。"""
     text = f"{title} {desc}"
     direction_patterns = {
         "LLM算法": [r"LLM", r"大语言模型", r"大模型算法", r"大模型"],
@@ -228,24 +196,18 @@ def identify_tech_direction(title: str, desc: str) -> str:
         "预训练": [r"预训练", r"pre-?train"],
         "对齐": [r"对齐", r"alignment"],
     }
-    found_directions = []
+    found = []
     for direction, patterns in direction_patterns.items():
         for pattern in patterns:
             if re.search(pattern, text, re.IGNORECASE):
-                if direction not in found_directions:
-                    found_directions.append(direction)
+                if direction not in found:
+                    found.append(direction)
                 break
-    return ", ".join(found_directions) if found_directions else ""
+    return ", ".join(found) if found else ""
 
 
 def identify_interview_type(title: str, desc: str) -> str:
-    """
-    识别面试类型（面试经历/面试题/面筋等）
-
-    :param title: 笔记标题
-    :param desc: 笔记内容
-    :return: 面试类型
-    """
+    """识别面试类型"""
     text = f"{title} {desc}"
     type_patterns = {
         "面试经历": [r"面试经历", r"面试经验", r"面试分享", r"offer"],
@@ -255,49 +217,48 @@ def identify_interview_type(title: str, desc: str) -> str:
         "简历": [r"简历", r"投递", r"内推"],
         "薪资": [r"薪资", r"薪酬", r"待遇", r"package", r"offer"],
     }
-    found_types = []
+    found = []
     for itype, patterns in type_patterns.items():
         for pattern in patterns:
             if re.search(pattern, text, re.IGNORECASE):
-                if itype not in found_types:
-                    found_types.append(itype)
+                if itype not in found:
+                    found.append(itype)
                 break
-    return ", ".join(found_types) if found_types else "面试相关"
+    return ", ".join(found) if found else "面试相关"
 
 
-def parse_note_time(timestamp_ms: int) -> str:
-    """
-    将时间戳（毫秒）转换为可读的时间字符串。
-
-    :param timestamp_ms: 毫秒级时间戳
-    :return: 格式化时间字符串
-    """
-    if not timestamp_ms:
+def parse_note_time(time_str: str) -> str:
+    """解析笔记时间字符串。"""
+    if not time_str:
         return ""
-    try:
-        dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone(timedelta(hours=8)))
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except (ValueError, OSError):
-        return ""
+    time_str = time_str.strip()
+    time_str = re.sub(r"^编辑于\s*", "", time_str)
 
-
-def is_note_recent(timestamp_ms: int, max_age_days: int = MAX_NOTE_AGE_DAYS) -> bool:
-    """
-    检查笔记是否在指定天数内。
-
-    :param timestamp_ms: 毫秒级时间戳
-    :param max_age_days: 最大天数
-    :return: 是否在范围内
-    """
-    if not timestamp_ms:
-        return True  # 如果没有时间信息，默认保留
-    try:
-        note_time = datetime.fromtimestamp(
-            timestamp_ms / 1000, tz=timezone(timedelta(hours=8))
+    if re.match(r"\d{4}-\d{2}-\d{2}", time_str):
+        return time_str[:10]
+    if re.match(r"\d{2}-\d{2}$", time_str):
+        return f"{datetime.now().year}-{time_str}"
+    match = re.match(r"(\d+)\s*天前", time_str)
+    if match:
+        return (datetime.now() - timedelta(days=int(match.group(1)))).strftime(
+            "%Y-%m-%d"
         )
-        cutoff = datetime.now(tz=timezone(timedelta(hours=8))) - timedelta(days=max_age_days)
-        return note_time >= cutoff
-    except (ValueError, OSError):
+    match = re.match(r"(\d+)\s*小时前", time_str)
+    if match:
+        return datetime.now().strftime("%Y-%m-%d")
+    if "昨天" in time_str:
+        return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    return time_str
+
+
+def is_note_recent(date_str: str, max_age_days: int = MAX_NOTE_AGE_DAYS) -> bool:
+    """检查笔记是否在指定天数内。"""
+    if not date_str:
+        return True
+    try:
+        note_date = datetime.strptime(date_str[:10], "%Y-%m-%d")
+        return note_date >= datetime.now() - timedelta(days=max_age_days)
+    except (ValueError, IndexError):
         return True
 
 
@@ -322,145 +283,13 @@ def save_history(note_ids: set):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def search_notes(
-    xhs_client: XhsClient,
-    query: dict,
-    max_pages: int = MAX_PAGES_PER_KEYWORD,
-    existing_ids: Optional[set] = None,
-) -> list[dict]:
-    """
-    搜索小红书笔记并解析结果。
-
-    :param xhs_client: XhsClient 实例
-    :param query: 搜索查询信息（包含 keyword, company, interview_type, tech_direction）
-    :param max_pages: 最大搜索页数
-    :param existing_ids: 已存在的笔记ID集合（用于去重）
-    :return: 解析后的笔记列表
-    """
-    keyword = query["keyword"]
-    results = []
-    if existing_ids is None:
-        existing_ids = set()
-
-    logger.info(f"开始搜索: '{keyword}'")
-
-    for page in range(1, max_pages + 1):
-        try:
-            _random_sleep(MIN_REQUEST_INTERVAL, MAX_REQUEST_INTERVAL)
-            search_result = xhs_client.get_note_by_keyword(
-                keyword=keyword,
-                page=page,
-                sort=SearchSortType.LATEST,  # 按时间排序获取最新内容
-            )
-
-            if not search_result or not search_result.get("items"):
-                logger.info(f"  关键词 '{keyword}' 第 {page} 页无结果，停止翻页")
-                break
-
-            items = search_result.get("items", [])
-            has_more = search_result.get("has_more", False)
-
-            for item in items:
-                note_card = item.get("note_card", {})
-                if not note_card:
-                    continue
-
-                note_id = item.get("id", "")
-                if note_id in existing_ids:
-                    continue
-
-                # 获取基本信息
-                title = note_card.get("display_title", "")
-                desc = note_card.get("desc", "")
-                user_info = note_card.get("user", {})
-                interact_info = note_card.get("interact_info", {})
-
-                # 时间戳
-                note_time = note_card.get("time", 0)
-
-                # 过滤: 时间范围
-                if not is_note_recent(note_time):
-                    continue
-
-                # 过滤: 最低互动量
-                liked_count = _parse_count(interact_info.get("liked_count", "0"))
-                collected_count = _parse_count(interact_info.get("collected_count", "0"))
-                if liked_count < MIN_LIKES and collected_count < MIN_COLLECTS:
-                    continue
-
-                # 识别公司和技术方向
-                detected_company = identify_company(title, desc)
-                if not detected_company and query.get("company"):
-                    detected_company = query["company"]
-
-                detected_tech = identify_tech_direction(title, desc)
-                if not detected_tech and query.get("tech_direction"):
-                    detected_tech = query["tech_direction"]
-
-                detected_interview_type = identify_interview_type(title, desc)
-
-                # 提取标签
-                tag_list = note_card.get("tag_list", [])
-                tags = ", ".join([t.get("name", "") for t in tag_list if t.get("name")])
-
-                # 笔记类型
-                note_type = note_card.get("type", "normal")
-
-                # 作者信息
-                author_name = user_info.get("nickname", "")
-                author_id = user_info.get("user_id", "")
-                author_home = f"https://www.xiaohongshu.com/user/profile/{author_id}" if author_id else ""
-
-                # 笔记链接
-                note_link = f"https://www.xiaohongshu.com/explore/{note_id}" if note_id else ""
-
-                # 内容摘要（截取前500字）
-                content_summary = desc[:500] if desc else title
-
-                parsed_note = {
-                    "笔记ID": note_id,
-                    "标题": title,
-                    "内容摘要": content_summary,
-                    "发布时间": parse_note_time(note_time),
-                    "公司": detected_company,
-                    "岗位方向": detected_tech,
-                    "面试类型": detected_interview_type,
-                    "作者昵称": author_name,
-                    "作者ID": author_id,
-                    "作者主页": author_home,
-                    "笔记链接": note_link,
-                    "点赞数": liked_count,
-                    "收藏数": collected_count,
-                    "评论数": _parse_count(interact_info.get("comment_count", "0")),
-                    "分享数": _parse_count(interact_info.get("share_count", "0")),
-                    "笔记类型": "视频" if note_type == "video" else "图文",
-                    "标签": tags,
-                    "抓取时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "搜索关键词": keyword,
-                }
-                results.append(parsed_note)
-                existing_ids.add(note_id)
-
-            logger.info(f"  第 {page} 页获取 {len(items)} 条，累计有效 {len(results)} 条")
-
-            if not has_more:
-                break
-
-        except Exception as e:
-            logger.error(f"  搜索 '{keyword}' 第 {page} 页出错: {e}")
-            _random_sleep(10, 20)  # 出错后等待更久
-            break
-
-    return results
-
-
 def _parse_count(count_str) -> int:
     """解析数量字符串（如 '1.2万'）为整数"""
     if isinstance(count_str, int):
         return count_str
     if not count_str:
         return 0
-    count_str = str(count_str).strip()
+    count_str = str(count_str).strip().replace("+", "")
     if "万" in count_str:
         try:
             return int(float(count_str.replace("万", "")) * 10000)
@@ -472,29 +301,268 @@ def _parse_count(count_str) -> int:
         return 0
 
 
-def fetch_note_detail(
-    xhs_client: XhsClient,
-    note_id: str,
-    xsec_token: str = "",
-) -> Optional[dict]:
-    """
-    获取单个笔记的详细内容。
+# JavaScript for extracting note cards from the search results page
+_JS_EXTRACT_NOTES = r"""
+() => {
+    const notes = [];
+    const sections = document.querySelectorAll('section.note-item');
+    for (const section of sections) {
+        try {
+            const linkEl = section.querySelector('a');
+            const href = linkEl ? linkEl.getAttribute('href') : '';
+            const noteIdMatch = href
+                ? href.match(/\/(?:explore|search_result)\/([a-f0-9]+)/)
+                : null;
+            const noteId = noteIdMatch ? noteIdMatch[1] : '';
 
-    :param xhs_client: XhsClient 实例
-    :param note_id: 笔记ID
-    :param xsec_token: xsec_token（从搜索结果中获取）
-    :return: 笔记详情字典
-    """
+            const titleEl = section.querySelector('.title span');
+            const title = titleEl ? titleEl.textContent.trim() : '';
+
+            const authorEl = section.querySelector('.author .name');
+            const authorName = authorEl ? authorEl.textContent.trim() : '';
+            const authorLink = section.querySelector('.author');
+            const authorHref = authorLink ? authorLink.getAttribute('href') : '';
+            const authorIdMatch = authorHref
+                ? authorHref.match(/\/user\/profile\/([a-f0-9]+)/)
+                : null;
+            const authorId = authorIdMatch ? authorIdMatch[1] : '';
+
+            const likeEl = section.querySelector('.like-wrapper .count');
+            const likeCount = likeEl ? likeEl.textContent.trim() : '0';
+
+            const isVideo = !!section.querySelector('.play-icon');
+
+            if (noteId) {
+                notes.push({
+                    noteId, title, authorName, authorId,
+                    likeCount, isVideo,
+                    href: 'https://www.xiaohongshu.com' + href,
+                });
+            }
+        } catch(e) {}
+    }
+    return notes;
+}
+"""
+
+# JavaScript for extracting note detail from a detail page
+_JS_EXTRACT_DETAIL = r"""
+() => {
+    const result = {};
+    const titleEl = document.querySelector('#detail-title');
+    result.title = titleEl ? titleEl.textContent.trim() : '';
+
+    const descEl = document.querySelector('#detail-desc');
+    result.desc = descEl ? descEl.textContent.trim() : '';
+
+    const timeEl = document.querySelector('.date');
+    result.dateStr = timeEl ? timeEl.textContent.trim() : '';
+
+    const likeEl = document.querySelector('.like-wrapper .count');
+    result.likeCount = likeEl ? likeEl.textContent.trim() : '0';
+
+    const collectEl = document.querySelector('.collect-wrapper .count');
+    result.collectCount = collectEl ? collectEl.textContent.trim() : '0';
+
+    const commentEl = document.querySelector('.chat-wrapper .count');
+    result.commentCount = commentEl ? commentEl.textContent.trim() : '0';
+
+    const tagEls = document.querySelectorAll('#detail-desc a.tag');
+    result.tags = Array.from(tagEls)
+        .map(t => t.textContent.trim())
+        .filter(Boolean);
+
+    return result;
+}
+"""
+
+
+def _extract_notes_from_page(page: Page) -> list[dict]:
+    """从当前搜索结果页面中提取笔记卡片数据。"""
+    return page.evaluate(_JS_EXTRACT_NOTES)
+
+
+def _fetch_note_detail_from_page(page: Page, note_url: str) -> dict:
+    """通过浏览器访问笔记详情页获取更多信息。"""
     try:
-        _random_sleep(MIN_REQUEST_INTERVAL, MAX_REQUEST_INTERVAL)
-        note_detail = xhs_client.get_note_by_id(
-            note_id=note_id,
-            xsec_token=xsec_token,
-        )
-        return note_detail
+        page.goto(note_url, wait_until="domcontentloaded")
+        page.wait_for_load_state("networkidle")
+        time.sleep(1)
+        return page.evaluate(_JS_EXTRACT_DETAIL)
     except Exception as e:
-        logger.error(f"获取笔记详情失败 {note_id}: {e}")
-        return None
+        logger.debug(f"获取笔记详情失败: {e}")
+        return {}
+
+
+def search_notes_via_browser(
+    page: Page,
+    query: dict,
+    max_pages: int = MAX_PAGES_PER_KEYWORD,
+    existing_ids: Optional[set] = None,
+) -> list[dict]:
+    """通过浏览器搜索小红书笔记并解析结果。"""
+    keyword = query["keyword"]
+    results = []
+    if existing_ids is None:
+        existing_ids = set()
+
+    logger.info(f"开始搜索: '{keyword}'")
+
+    encoded_keyword = urllib.parse.quote(keyword)
+    search_url = (
+        f"https://www.xiaohongshu.com/search_result?"
+        f"keyword={encoded_keyword}&source=web_explore_feed"
+    )
+
+    try:
+        page.goto(search_url, wait_until="domcontentloaded")
+        page.wait_for_load_state("networkidle")
+        time.sleep(2)
+
+        # 关闭可能弹出的登录框
+        try:
+            close_btn = page.query_selector(".close-button, .login-modal .close")
+            if close_btn:
+                close_btn.click()
+                time.sleep(0.5)
+        except Exception:
+            pass
+
+        all_note_ids_on_page = set()
+
+        for scroll_round in range(max_pages):
+            raw_notes = _extract_notes_from_page(page)
+
+            new_notes_this_round = 0
+            for raw in raw_notes:
+                note_id = raw.get("noteId", "")
+                if (
+                    not note_id
+                    or note_id in existing_ids
+                    or note_id in all_note_ids_on_page
+                ):
+                    continue
+
+                all_note_ids_on_page.add(note_id)
+                title = raw.get("title", "")
+                author_name = raw.get("authorName", "")
+                author_id = raw.get("authorId", "")
+                like_count = _parse_count(raw.get("likeCount", "0"))
+                is_video = raw.get("isVideo", False)
+                note_link = raw.get("href", "")
+                if not note_link and note_id:
+                    note_link = (
+                        f"https://www.xiaohongshu.com/explore/{note_id}"
+                    )
+
+                detected_company = identify_company(title, "")
+                if not detected_company and query.get("company"):
+                    detected_company = query["company"]
+
+                detected_tech = identify_tech_direction(title, "")
+                if not detected_tech and query.get("tech_direction"):
+                    detected_tech = query["tech_direction"]
+
+                detected_interview_type = identify_interview_type(title, "")
+
+                author_home = (
+                    f"https://www.xiaohongshu.com/user/profile/{author_id}"
+                    if author_id
+                    else ""
+                )
+
+                parsed_note = {
+                    "笔记ID": note_id,
+                    "标题": title,
+                    "内容摘要": "",
+                    "发布时间": "",
+                    "公司": detected_company,
+                    "岗位方向": detected_tech,
+                    "面试类型": detected_interview_type,
+                    "作者昵称": author_name,
+                    "作者ID": author_id,
+                    "作者主页": author_home,
+                    "笔记链接": note_link,
+                    "点赞数": like_count,
+                    "收藏数": 0,
+                    "评论数": 0,
+                    "分享数": 0,
+                    "笔记类型": "视频" if is_video else "图文",
+                    "标签": "",
+                    "抓取时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "搜索关键词": keyword,
+                }
+                results.append(parsed_note)
+                existing_ids.add(note_id)
+                new_notes_this_round += 1
+
+            logger.info(
+                f"  第 {scroll_round + 1} 轮滚动: "
+                f"本轮新增 {new_notes_this_round} 条，"
+                f"累计有效 {len(results)} 条"
+            )
+
+            if new_notes_this_round == 0 and scroll_round > 0:
+                logger.info("  无新增笔记，停止滚动")
+                break
+
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            _random_sleep(2, 4)
+
+    except Exception as e:
+        logger.error(f"  搜索 '{keyword}' 出错: {e}")
+        _random_sleep(10, 20)
+
+    return results
+
+
+def enrich_notes_with_details(
+    page: Page,
+    notes: list[dict],
+    max_detail_fetches: int = 10,
+) -> list[dict]:
+    """对搜索结果中的笔记逐个打开详情页补充内容。"""
+    count = 0
+    for note in notes:
+        if count >= max_detail_fetches:
+            break
+        note_link = note.get("笔记链接", "")
+        if not note_link:
+            continue
+
+        _random_sleep(MIN_REQUEST_INTERVAL, MAX_REQUEST_INTERVAL)
+        detail = _fetch_note_detail_from_page(page, note_link)
+
+        if detail:
+            if detail.get("desc"):
+                note["内容摘要"] = detail["desc"][:500]
+            if detail.get("dateStr"):
+                note["发布时间"] = parse_note_time(detail["dateStr"])
+            if detail.get("collectCount"):
+                note["收藏数"] = _parse_count(detail["collectCount"])
+            if detail.get("commentCount"):
+                note["评论数"] = _parse_count(detail["commentCount"])
+            if detail.get("likeCount"):
+                note["点赞数"] = _parse_count(detail["likeCount"])
+            if detail.get("tags"):
+                note["标签"] = ", ".join(detail["tags"])
+
+            if detail.get("desc"):
+                title = note.get("标题", "")
+                desc = detail["desc"]
+                new_company = identify_company(title, desc)
+                if new_company:
+                    note["公司"] = new_company
+                new_tech = identify_tech_direction(title, desc)
+                if new_tech:
+                    note["岗位方向"] = new_tech
+                new_type = identify_interview_type(title, desc)
+                if new_type:
+                    note["面试类型"] = new_type
+        count += 1
+
+    logger.info(f"  已补充 {count} 条笔记的详情信息")
+    return notes
 
 
 def run_scraper(
@@ -502,61 +570,62 @@ def run_scraper(
     incremental: bool = True,
     max_keywords: Optional[int] = None,
 ) -> list[dict]:
-    """
-    运行抓取器主流程。
-
-    :param cookie: 小红书网页版 cookie
-    :param incremental: 是否增量抓取（跳过已抓取过的笔记）
-    :param max_keywords: 最大搜索关键词数量（用于测试）
-    :return: 所有抓取到的笔记列表
-    """
+    """运行抓取器主流程。"""
     setup_logging()
     logger.info("=" * 60)
     logger.info("小红书面试信息抓取开始")
     logger.info("=" * 60)
 
-    # 加载历史记录
     existing_ids = load_history() if incremental else set()
     logger.info(f"已有历史记录: {len(existing_ids)} 条")
 
-    # 创建客户端
-    xhs_client = create_xhs_client(cookie)
+    context, page = create_browser_context(cookie)
 
-    # 生成搜索关键词
     queries = generate_search_queries()
     if max_keywords:
         queries = queries[:max_keywords]
 
     all_notes = []
-    total_requests = 0
+    total_searches = 0
     batch_count = 0
 
     for i, query in enumerate(queries):
-        if total_requests >= MAX_DAILY_REQUESTS:
-            logger.warning(f"已达到每日最大请求次数 ({MAX_DAILY_REQUESTS})，停止抓取")
+        if total_searches >= MAX_DAILY_REQUESTS:
+            logger.warning(
+                f"已达到每日最大请求次数 ({MAX_DAILY_REQUESTS})，停止抓取"
+            )
             break
 
         logger.info(f"\n[{i + 1}/{len(queries)}] 搜索: {query['keyword']}")
 
-        notes = search_notes(
-            xhs_client=xhs_client,
+        notes = search_notes_via_browser(
+            page=page,
             query=query,
             existing_ids=existing_ids,
         )
-        all_notes.extend(notes)
-        total_requests += MAX_PAGES_PER_KEYWORD
 
-        # 每10个关键词休息一段时间
+        if notes:
+            notes = enrich_notes_with_details(page, notes, max_detail_fetches=5)
+
+        all_notes.extend(notes)
+        total_searches += 1
+
+        _random_sleep(MIN_REQUEST_INTERVAL, MAX_REQUEST_INTERVAL)
+
         batch_count += 1
         if batch_count >= 10:
-            logger.info(f"已完成一批搜索，休息中...")
+            logger.info("已完成一批搜索，休息中...")
             _random_sleep(BATCH_REST_MIN, BATCH_REST_MAX)
             batch_count = 0
 
-    # 保存历史记录
     for note in all_notes:
         existing_ids.add(note["笔记ID"])
     save_history(existing_ids)
+
+    try:
+        context.close()
+    except Exception:
+        pass
 
     logger.info("=" * 60)
     logger.info(f"抓取完成！共获取 {len(all_notes)} 条新笔记")
