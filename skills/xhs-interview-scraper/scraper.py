@@ -375,13 +375,13 @@ _JS_EXTRACT_DETAIL = r"""
     result.dateStr = timeEl ? timeEl.textContent.trim() : '';
 
     const likeEl = document.querySelector('.like-wrapper .count');
-    result.likeCount = likeEl ? likeEl.textContent.trim() : '0';
+    result.likeCount = likeEl ? likeEl.textContent.trim() : null;
 
     const collectEl = document.querySelector('.collect-wrapper .count');
-    result.collectCount = collectEl ? collectEl.textContent.trim() : '0';
+    result.collectCount = collectEl ? collectEl.textContent.trim() : null;
 
     const commentEl = document.querySelector('.chat-wrapper .count');
-    result.commentCount = commentEl ? commentEl.textContent.trim() : '0';
+    result.commentCount = commentEl ? commentEl.textContent.trim() : null;
 
     const tagEls = document.querySelectorAll('#detail-desc a.tag');
     result.tags = Array.from(tagEls)
