@@ -185,16 +185,16 @@ def main():
         return
 
     # 导出 Excel
-    output_path = export_to_excel(
+    output_path, all_notes = export_to_excel(
         notes=notes,
         output_path=args.output,
         append=incremental,
     )
     logger.info(f"Excel 输出: {output_path}")
 
-    # 可选: 导出 JSON
+    # 可选: 导出 JSON（包含历史数据 + 新数据）
     if args.export_json:
-        export_json(notes, DATA_DIR)
+        export_json(all_notes, DATA_DIR)
 
     logger.info("=" * 60)
     logger.info("任务完成!")

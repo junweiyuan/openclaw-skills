@@ -325,4 +325,4 @@ def export_to_excel(
     logger.info(f"Excel 文件已保存: {output_path}")
     logger.info(f"  总计: {len(all_notes)} 条 (新增: {len(new_notes)} 条)")
 
-    return output_path
+    return output_path, all_notes
