@@ -15,14 +15,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from xhs import XhsClient
+from xhs import SearchSortType, XhsClient
 from playwright.sync_api import sync_playwright
 
 from config import (
     BATCH_REST_MAX,
     BATCH_REST_MIN,
     COMPANY_SHORT_NAMES,
-    EXCEL_HEADERS,
     HISTORY_FILE,
     INTERVIEW_KEYWORDS,
     MAX_DAILY_REQUESTS,
@@ -32,7 +31,6 @@ from config import (
     MIN_COLLECTS,
     MIN_LIKES,
     MIN_REQUEST_INTERVAL,
-    TARGET_COMPANIES,
     TECH_DIRECTIONS,
     DATA_DIR,
     LOG_FILE,
@@ -352,7 +350,7 @@ def search_notes(
             search_result = xhs_client.get_note_by_keyword(
                 keyword=keyword,
                 page=page,
-                sort="time_descending",  # 按时间排序获取最新内容
+                sort=SearchSortType.LATEST,  # 按时间排序获取最新内容
             )
 
             if not search_result or not search_result.get("items"):
@@ -379,7 +377,6 @@ def search_notes(
 
                 # 时间戳
                 note_time = note_card.get("time", 0)
-                last_update = note_card.get("last_update_time", 0)
 
                 # 过滤: 时间范围
                 if not is_note_recent(note_time):
