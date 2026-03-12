@@ -143,8 +143,11 @@ def create_company_sheets(wb: Workbook, notes: list[dict]):
         if len(company_notes) < 2:
             continue  # 跳过笔记太少的公司
 
-        # Excel Sheet名称限制31个字符
-        sheet_name = company[:31]
+        # Excel Sheet名称限制31个字符，且不能包含 \ / * ? : [ ]
+        sheet_name = company
+        for ch in r'\/*?:[]':
+            sheet_name = sheet_name.replace(ch, '_')
+        sheet_name = sheet_name[:31]
         # 确保不重名
         if sheet_name in wb.sheetnames:
             sheet_name = f"{sheet_name[:28]}_{len(wb.sheetnames)}"

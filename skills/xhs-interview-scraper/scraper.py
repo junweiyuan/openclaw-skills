@@ -106,7 +106,10 @@ def create_browser_context(cookie: str) -> tuple[BrowserContext, Page, "Browser"
 
             page = context.new_page()
             page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded")
-            page.wait_for_load_state("networkidle")
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                logger.debug("networkidle timeout on initial page, continuing anyway")
             time.sleep(2)
 
             logger.info("Playwright 浏览器上下文创建成功")
