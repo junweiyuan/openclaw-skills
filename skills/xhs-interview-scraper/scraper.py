@@ -246,7 +246,14 @@ def parse_note_time(time_str: str) -> str:
     if re.match(r"\d{4}-\d{2}-\d{2}", time_str):
         return time_str[:10]
     if re.match(r"\d{2}-\d{2}$", time_str):
-        return f"{datetime.now().year}-{time_str}"
+        candidate = f"{datetime.now().year}-{time_str}"
+        try:
+            candidate_date = datetime.strptime(candidate, "%Y-%m-%d")
+            if candidate_date > datetime.now():
+                candidate = f"{datetime.now().year - 1}-{time_str}"
+        except ValueError:
+            pass
+        return candidate
     match = re.match(r"(\d+)\s*天前", time_str)
     if match:
         return (datetime.now() - timedelta(days=int(match.group(1)))).strftime(

@@ -302,7 +302,7 @@ def export_to_excel(
         return output_path
 
     # 按发布时间排序（最新在前）
-    all_notes.sort(key=lambda x: x.get("发布时间", ""), reverse=True)
+    all_notes.sort(key=lambda x: x.get("发布时间") or "", reverse=True)
 
     # 创建工作簿
     wb = create_workbook()
