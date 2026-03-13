@@ -7,6 +7,9 @@ XHS Interview Scraper - Main Entry Point
      结构化存储到 Excel 表格，支持增量更新。
 
 用法：
+    # 自动登录（推荐，弹出浏览器扫码后自动抓取）
+    python main.py --login
+
     # 首次运行（抓取所有关键词）
     python main.py --cookie "your_cookie_here"
 
@@ -21,12 +24,6 @@ XHS Interview Scraper - Main Entry Point
 
     # 每日定时任务模式
     python main.py --cookie "your_cookie_here" --daily
-
-获取Cookie说明：
-    1. 用浏览器打开 https://www.xiaohongshu.com
-    2. 登录账号
-    3. 按 F12 打开开发者工具 → Application → Cookies
-    4. 复制整个 cookie 字符串
 """
 
 import argparse
@@ -49,23 +46,28 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 基本使用（首次抓取）
-  python main.py --cookie "a1=xxx; web_session=xxx; ..."
+  # 自动登录 + 抓取（推荐）
+  python main.py --login
 
-  # 增量更新
-  python main.py --cookie "a1=xxx; ..." --incremental
-
-  # 测试模式（只搜索少量关键词）
-  python main.py --cookie "a1=xxx; ..." --max-keywords 3
+  # 自动登录 + 测试模式
+  python main.py --login --max-keywords 3
 
   # 从文件读取cookie
   python main.py --cookie-file cookie.txt
+
+  # 手动传入cookie
+  python main.py --cookie "a1=xxx; web_session=xxx; ..."
 
 目标公司: OpenAI, xAI, Google, Amazon, Apple, Meta, Anthropic, DeepSeek, Kimi, Seed
 技术方向: LLM算法, AIInfra, 多模态算法, 强化学习算法, NLP, 推理优化
         """,
     )
     cookie_group = parser.add_mutually_exclusive_group(required=True)
+    cookie_group.add_argument(
+        "--login",
+        action="store_true",
+        help="自动打开浏览器扫码登录获取 Cookie（推荐）",
+    )
     cookie_group.add_argument(
         "--cookie",
         type=str,
@@ -150,7 +152,12 @@ def main():
     logger.info("=" * 60)
 
     # 获取 Cookie
-    if args.cookie_file:
+    if args.login:
+        from get_cookie import login_and_save_cookie, COOKIE_FILE
+        logger.info("启动浏览器扫码登录...")
+        cookie = login_and_save_cookie(headless=False)
+        logger.info("登录成功，开始抓取")
+    elif args.cookie_file:
         cookie = load_cookie_from_file(args.cookie_file)
     else:
         cookie = args.cookie
